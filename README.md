@@ -1,10 +1,7 @@
-stream.js
+chunked.js
 =========
 
-Polyfill for [Streams API](https://dvcs.w3.org/hg/streams-api/raw-file/tip/Overview.htm#stream-interface).
+Polyfill for _chunked_ XMLHttpRequest extension proposed by Mozilla.
 
-Near goal is to have `ArrayBuffer` support. `readAsText` is no immediate goal.
-
-###WONTFIX:
-* Will for now not implement `StreamBuilder` since it is expected to be merged into `Stream`.
+Was started as polyfill for [Streams API](https://dvcs.w3.org/hg/streams-api/raw-file/tip/Overview.htm#stream-interface), but due to the sheer size of the spec, it was reduced to handle the basics.
 

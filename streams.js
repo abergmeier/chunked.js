@@ -3,16 +3,21 @@
 	/**
 	 * @const
 	 */
-	var global = window;
-	/**
-	 * @const
-	 */
 	var config = { is_worker: !(window && window.document)
 	};
+	
 	/**
 	 * @const
 	 */
-	var STREAM = { 
+	var global = config.is_worker ? self : window;
+	
+	var CHUNKED_RESPONSE_TYPES = { text       : "chunked-text"       ,
+	                               arraybuffer: "chunked-arraybuffer",
+	                               blob       : "chunked-blob"         };
+	/**
+	 * @const
+	 */
+	var VARIANTS = { 
 		/**
 		 * @const
 		 */
@@ -49,7 +54,7 @@
 				 */
 				var chain = function() {
 					req.open( "GET", url, config.async );
-					req.responseType = STREAM.NONE.responseType;
+					req.responseType = VARIANTS.NONE.responseType;
 					(function() {
 						/**
 						 * Special request handler
@@ -73,7 +78,7 @@
 					};
 					req.onerror = function( event ) {
 						// Fallback to whole file download
-						STREAM.NONE.load_complete( req, url );
+						VARIANTS.NONE.load_complete( req, url );
 					};
 				};
 				chain();
@@ -87,7 +92,7 @@
 			 */
 			load_complete: function( req, config, callbacks ) {
 				req.open( "GET", config.url, config.async );
-				req.responseType = STREAM.NONE.responseType;
+				req.responseType = VARIANTS.NONE.responseType;
 				req.onload = function( event ) {
 					callbacks.load();
 				};
@@ -96,21 +101,26 @@
 				};
 				req.send();
 			},
+			IGNORED_METHODS: [ "CONNECT", "HEAD" ],
+			handles: function( config ) {
+				return !( config.method in VARIANTS.NONE.IGNORED_METHODS );
+			},
 			send: function( req, config, callbacks ) {
+				if( config.method )
 				req.open( "HEAD", config.url, config.async );
 				req.responseType = "";
 				req.onload = function( event ) {
 					var length = req.getResponseHeader( "Content-Length" );
 					length = Number( length );
 					if( length == 0 )
-						STREAM.NONE.load_complete( req, config, callbacks );
+						VARIANTS.NONE.load_complete( req, config, callbacks );
 					else
-						STREAM.NONE.load_chunked( req, config, callbacks, length );
+						VARIANTS.NONE.load_chunked( req, config, callbacks, length );
 				};
 				req.onerror = function( event ) {
 					// TODO: Only fall back to load, when error
 					// is recoverable!
-					STREAM.NONE.load_complete( req, config );
+					VARIANTS.NONE.load_complete( req, config, callbacks );
 				};
 				req.send();
 			}
@@ -118,7 +128,7 @@
 		/**
 		 * @const
 		 */
-		API: {
+		STREAM_API: {
 			/**
 			 * @const
 			 */
@@ -126,8 +136,71 @@
 			/**
 			 * @const
 			 */
-			responseType: "stream",
-			send: undefined
+			RESPONSE_TYPE: "stream",
+			/**
+			 * @param
+			 */
+			handles: function( config ) {
+				return false;
+			},
+			FLAGS: { TEXT       : 1 << 1,
+			         ARRAYBUFFER: 1 << 2,
+			         BLOB       : 1 << 3
+			},
+			FLAG_MAPPINGS: { "chunked-text"       : VARIANTS.STREAM_API.FLAGS.TEXT       ,
+			                 "chunked-arraybuffer": VARIANTS.STREAM_API.FLAGS.ARRAYBUFFER,
+			                 "chunked-blob"       : VARIANTS.STREAM_API.FLAGS.BLOB
+			},
+			/**
+			 * @const
+			 * @param {number}
+			 * @param
+			 * @param {XMLHttpRequest}
+			 */
+			extract_response: function( flags, reader, req ) {
+				var response;
+				if( flags | VARIANTS.STREAM_API.FLAGS.TEXT )
+					response = reader.readAsBlob( req.response );
+				else if( flags | VARIANTS.STREAM_API.FLAGS.ARRAYBUFFER )
+					response = reader.readAsArrayBuffer( req.response );
+				else if( flags | VARIANTS.STREAM_API.FLAGS.TEXT)
+					response = reader.readAsText( req.response );
+				else
+					console.log("Unhandled flags" + flags);
+				return response;
+			},
+			send: function( req, config, callbacks ) {
+				/**
+				 * @const
+				 */
+				var reader = new StreamReaderSync();
+				req.open( config.method,
+				          config.url   ,
+				          config.async   );
+				req.responseType = VARIANTS.STREAM_API.RESPONSE_TYPE;
+				var flags = VARIANTS.STREAM_API.FLAG_MAPPINGS[ config.responseType ];
+				req.onloadstart = function( event ) {
+					callbacks.loadstart( event,
+					                     VARIANTS.STREAM_API.extract_response( flags ,
+					                                                           reader,
+					                                                           req     ) );
+				};
+				req.onloadend = function( event ) {
+					callbacks.loadend( event,
+					                   VARIANTS.STREAM_API.extract_response( flags ,
+					                                                         reader,
+					                                                         req     ) );
+				};
+				req.onload = function( event ) {
+					callbacks.load( event,
+					                VARIANTS.STREAM_API.extract_response( flags,
+					                                                      reader,
+					                                                      req     ) );
+				};
+				req.onerror = callbacks.error;
+				req.onabort = callbacks.abort;
+				req.send();
+			}
 		},
 		/**
 		 * Config data for redirecting to Mozilla specific variant
@@ -141,19 +214,32 @@
 			value:        1 << 1,
 			/**
 			 * @const
+			 * @struct
 			 */
-			chunked_maps: { "text"       : "moz-chunked-text",
-			                "arraybuffer": "moz-chunked-arraybuffer",
-			                "blob"       : "moz-chunked-blob",
-				
+			CHUNKED_MAPPINGS: { "chunked-text"       : "moz-chunked-text",
+			                    "chunked-arraybuffer": "moz-chunked-arraybuffer",
+			                    "chunked-blob"       : "moz-chunked-blob"
 			},
-			responseType: "moz-chunked-arraybuffer",
+			/**
+			 * @const
+			 * @param {String}
+			 * @returns {boolean}
+			 */
+			handles: function( config ) {
+				return config.responseType in VARIANTS.MOZ.CHUNKED_MAPPINGS;
+			},
+			responseType: VARIANTS.MOZ.CHUNKED_MAPPINGS[ "chunked-arraybuffer" ],
 			send: function( req, config, callbacks ) {
-				req.open( config.method, config.url, config.async );
-				if( config.method === "text") {
-					"moz-chunked-text"
-				}
-				
+				req.open( config.method,
+				          config.url,
+				          config.async );
+				req.responseType = VARIANTS.MOZ.CHUNKED_MAPPINGS[ config.responseType ];
+				req.onloadstart = callbacks.loadstart;
+				req.onloadend   = callbacks.loadend;
+				req.onload      = callbacks.load;
+				req.onerror     = callbacks.error;
+				req.onabort     = callbacks.abort;
+				req.send( config.data );
 			}
 		}
 	};
@@ -188,14 +274,10 @@
 					// Ignore and go to next
 				}
 			}
-			return STREAM.NONE;
+			return VARIANTS.NONE;
 		}
-	)( [STREAM.API, STREAM.MOZ] );
+	)( [VARIANTS.STREAM_API, VARIANTS.MOZ] );
 	
-	if( streamMethod == STREAM.API )
-		return;
-	
-	// No native support, so start emulating
 	/**
 	 * @const
 	 * @param {String}
@@ -220,30 +302,29 @@
 	
 	//TODO: Perhaps check whether wrapper are complete
 	
-	/**
-	 * @constructor
-	 */
-	window.StreamError = window.StreamError || function() {
-	};
-	
 	(function() {
 		// Create Stream object
 		/**
 		 * @constructor
 		 */
-		window.Stream = window.Stream || function( data ) {
+		window["Stream"] = window["Stream"] || function( data ) {
 			var internal = { 
 				position: 0,
 				/**
 				 * @type {number}
 				 */
-				readyState: this.EMPTY,
+				readyState : this.EMPTY,
 				arrayBuffer: null,
-				get left() {
-					return internal.arrayBuffer.length - internal.position;
-				},
-				type: null
+				type       : null
 			};
+			Object.defineProperties(
+				internal,
+				{
+					left: { get: function() {
+						return internal.arrayBuffer.length - internal.position;
+					} }
+				}
+			);
 			Object.defineProperties(
 				this,
 				{
@@ -287,7 +368,7 @@
 		 * @constructor
 		 * @extends XMLHttpRequest
 		 */
-		window.XMLHttpRequest = (function( origRequest ) {
+		window["XMLHttpRequest"] = (function( origRequest ) {
 			/**
 			 * @const
 			 * @type {XMLHttpRequest}
@@ -304,7 +385,7 @@
 					/**
 					 * @type {boolean}
 					 */
-					is_stream: false,
+					is_chunked: false,
 					
 					method: null,
 					async: true,
@@ -330,27 +411,32 @@
 					/**
 					 * @const
 					 */
+					CHUNKED_RESPONSE_TYPES: [ "chunked-text"       ,
+					                          "chunked-arraybuffer",
+					                          "chunked-blob"
+					],
+					/**
+					 * @const
+					 */
 					send: function( data ) {
-						var config = { method  : internal.method,
-						               asyc    : internal.async,
-						               user    : internal.user,
-						               password: internal.password
+						/**
+						 * @const
+						 * @struct
+						 */
+						var config = { method      : internal.method      ,
+						               asyc        : internal.async       ,
+						               user        : internal.user        ,
+						               password    : internal.password    ,
+						               responseType: internal.responseType,
+						               data        : data
 						};
-						streamMethod.send( this, config );
-					},
-					getResponseType: function() {
-						if( internal.is_stream )
-							return STREAM.API.responseType;
-						return base.responseType;
-					},
-					setResponseType: function( val ) {
-						if( val === "stream" ) {
-							// Add special stream handling
-							internal.is_stream = true;
-							val = streamMethod.responseType;
-						} else
-							internal.is_stream = false;
-						base.responseType = val;
+						if( config.responseType in CHUNKED_RESPONSE_TYPES
+						 || streamMethod.handles( config ) ) {
+
+							streamMethod.send( this, config, callbacks );
+						} else {
+							base.send( data );
+						}
 					},
 					getResponse: function() {
 						if( internal.is_stream ) {
@@ -373,8 +459,7 @@
 				Object.defineProperties(
 					this,
 					{
-						"responseType"         : { get  : internal.getResponseType,
-						                           set  : internal.setResponseType                 },
+						"responseType"         : { value: fix("responseType"                     ) },
 						"response"             : { get  : internal.getResponse                     },
 						"readyState"           : { get  : function() { return base.readyState  ; } },
 						"open"                 : { value: fix("open"                             ) },
@@ -434,7 +519,7 @@
 			 * @param {number=} opt_param
 			 */
 			this.readAsBlob = function( stream, maxSize ) {
-				if( maxSize !=== undefined && maxSize < 1 )
+				if( maxSize !== undefined && maxSize < 1 )
 					throw new InvalidArgumentException();
 				if( this.readyState === this.LOADING )
 					throw NOT_ALLOWED_ERR();
@@ -456,7 +541,6 @@
 				                          }
 				                        },
 				                        maxSize );
-				}
 			};
 			/**
 			 * @param {Stream}
